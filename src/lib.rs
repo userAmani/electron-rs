@@ -384,7 +384,19 @@ fn compile_native_assets(dir: &Path, target: &DistributionTarget) -> Result<(), 
     fs::remove_file(&binary).map_err(|error| Error::with_source("remove AppKit bridge link", error))?;
   }
   let arch = if target.arch == "arm64" { "arm64" } else { "x86_64" };
-  let output = ProcessCommand::new("clang++")
+  let sdk = std::env::var_os("SDKROOT").filter(|value| !value.is_empty()).unwrap_or_else(|| "macosx".into());
+  let resolved = ProcessCommand::new("/usr/bin/xcrun")
+    .arg("--sdk").arg(&sdk).arg("--show-sdk-path")
+    .output().map_err(|error| Error::with_source("APPKIT_SDK_NOT_FOUND: resolve selected macOS SDK", error))?;
+  if !resolved.status.success() {
+    return Err(format!("APPKIT_SDK_NOT_FOUND: {}", String::from_utf8_lossy(&resolved.stderr).trim()).into());
+  }
+  let sdk = PathBuf::from(String::from_utf8_lossy(&resolved.stdout).trim());
+  if !sdk.is_absolute() || !sdk.is_dir() {
+    return Err(format!("APPKIT_SDK_NOT_FOUND: invalid macOS SDK path {}", sdk.display()).into());
+  }
+  let output = ProcessCommand::new("/usr/bin/xcrun")
+    .args(["--sdk", "macosx", "clang++", "-isysroot"]).arg(&sdk).env("SDKROOT", &sdk)
     .args(["-std=c++17", "-fobjc-arc", "-fblocks", "-bundle", "-undefined", "dynamic_lookup", "-framework", "AppKit", "-arch", arch, "-mmacosx-version-min=12.0"])
     .arg(dir.join("appkit.mm")).arg("-o").arg(&binary)
     .output().map_err(|error| Error::with_source("start AppKit bridge compiler", error))?;
@@ -402,6 +414,35 @@ fn compile_native_assets(dir: &Path, target: &DistributionTarget) -> Result<(), 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn appkit_compilation_uses_selected_sdk_without_shell_configuration() {
+    const WORKER: &str = "ELECTRON_RS_APPKIT_SDK_TEST";
+    if let Some(directory) = std::env::var_os(WORKER) {
+      let target = DistributionTarget::current().unwrap();
+      compile_native_assets(Path::new(&directory), &target).unwrap();
+      return;
+    }
+    let root = acquisition::unique_sibling(&std::env::temp_dir().join("electron-appkit-sdk"), "test");
+    for (triple, arch) in [("aarch64-apple-darwin", "arm64"), ("x86_64-apple-darwin", "x86_64")] {
+      let directory = root.join(arch);
+      fs::create_dir_all(&directory).unwrap();
+      fs::write(directory.join("appkit.mm"), include_bytes!("../native/appkit.mm")).unwrap();
+      let output = ProcessCommand::new(std::env::current_exe().unwrap())
+        .args(["--exact", "tests::appkit_compilation_uses_selected_sdk_without_shell_configuration", "--nocapture"])
+        .env(WORKER, &directory).env("TARGET", triple).env_remove("SDKROOT")
+        .output().unwrap();
+      assert!(output.status.success(), "{arch}: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+      let binary = directory.join("appkit.node");
+      let architecture = ProcessCommand::new("/usr/bin/lipo").arg("-archs").arg(&binary).output().unwrap();
+      assert!(architecture.status.success(), "{arch}: {}", String::from_utf8_lossy(&architecture.stderr));
+      assert_eq!(String::from_utf8_lossy(&architecture.stdout).trim(), arch);
+      let signature = ProcessCommand::new("/usr/bin/codesign").args(["--verify", "--strict"]).arg(&binary).output().unwrap();
+      assert!(signature.status.success(), "{arch}: {}", String::from_utf8_lossy(&signature.stderr));
+    }
+    fs::remove_dir_all(root).unwrap();
+  }
 
   #[test]
   fn builder_pe_respects_consumer_profile_and_explicit_overrides() {
