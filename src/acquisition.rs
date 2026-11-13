@@ -278,7 +278,8 @@ fn resolve_output(
     let out = absolute_path(out, current_dir)?;
     let package = out.parent().filter(|_| out.file_name().is_some_and(|name| name == "out"))
       .ok_or("unexpected Cargo OUT_DIR layout: expected <target>/<profile>/build/<package>/out")?;
-    let build = package.parent().filter(|build| build.file_name().is_some_and(|name| name == "build"))
+    let build = package.ancestors().skip(1).take(2)
+      .find(|path| path.file_name().is_some_and(|name| name == "build"))
       .ok_or("unexpected Cargo OUT_DIR layout: missing build directory")?;
     let profile = build.parent().ok_or("Cargo OUT_DIR has no profile directory")?;
     let mut root = profile.parent().ok_or("Cargo profile has no target directory")?;
@@ -914,7 +915,14 @@ mod tests {
   fn output_uses_consuming_out_dir_for_native_cross_and_custom_profiles() {
     let root = temporary("out-dir");
     let target = target("aarch64-unknown-linux-gnu");
-    for suffix in ["debug/build/pkg/out", "aarch64-unknown-linux-gnu/release/build/pkg/out", "aarch64-unknown-linux-gnu/custom/build/pkg/out"] {
+    for suffix in [
+      "debug/build/pkg/out",
+      "aarch64-unknown-linux-gnu/release/build/pkg/out",
+      "aarch64-unknown-linux-gnu/custom/build/pkg/out",
+      "release/build/tauri-runtime-electron/03fb266a4a9d66ed/out",
+      "aarch64-unknown-linux-gnu/release/build/tauri-runtime-electron/03fb266a4a9d66ed/out",
+      "aarch64-unknown-linux-gnu/custom/build/tauri-runtime-electron/03fb266a4a9d66ed/out",
+    ] {
       let output = resolve_output(None, &target, Some(&root.join(suffix)), Some(&root.join("ignored")), &|| panic!("absolute Cargo inputs need no cwd")).unwrap();
       assert_eq!(output, root.join("electron/linux-arm64"));
     }
@@ -930,9 +938,11 @@ mod tests {
     for relative in [false, true] {
       let configured_input = if relative { Path::new(&target.triple) } else { &configured };
       for profile in [configured.join("debug"), configured.join(&target.triple).join("release")] {
-        let out = profile.join("build/pkg/out");
-        fs::create_dir_all(&out).unwrap();
-        assert_eq!(resolve_output(None, &target, Some(&out), Some(configured_input), &|| Ok(root.clone())).unwrap(), configured.join("electron/win32-x64"));
+        for suffix in ["build/pkg/out", "build/tauri-runtime-electron/03fb266a4a9d66ed/out"] {
+          let out = profile.join(suffix);
+          fs::create_dir_all(&out).unwrap();
+          assert_eq!(resolve_output(None, &target, Some(&out), Some(configured_input), &|| Ok(root.clone())).unwrap(), configured.join("electron/win32-x64"));
+        }
       }
     }
     fs::remove_dir_all(root).unwrap();
@@ -946,6 +956,17 @@ mod tests {
     assert_eq!(resolve_output(Some(&explicit), &expected, Some(Path::new("invalid")), Some(Path::new("ignored")), &|| panic!("absolute output needs no cwd")).unwrap(), explicit);
     assert!(resolve_output(None, &expected, Some(Path::new("invalid")), None, &|| Ok(root.clone())).is_err());
     assert_eq!(resolve_output(Some(Path::new("relative")), &expected, Some(Path::new("invalid")), None, &|| Ok(root.clone())).unwrap(), root.join("relative"));
+    fs::remove_dir_all(root).unwrap();
+  }
+
+  #[test]
+  fn output_rejects_unrecognized_cargo_layouts() {
+    let root = temporary("invalid-out-dir");
+    let target = target("x86_64-pc-windows-msvc");
+    for suffix in ["release/pkg/out", "release/build/pkg/hash/nested/out", "release/build/pkg/not-out"] {
+      let error = resolve_output(None, &target, Some(&root.join(suffix)), None, &|| panic!("absolute Cargo inputs need no cwd")).unwrap_err();
+      assert!(error.to_string().contains("unexpected Cargo OUT_DIR layout"), "{suffix}: {error}");
+    }
     fs::remove_dir_all(root).unwrap();
   }
 
