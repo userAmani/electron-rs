@@ -28,7 +28,7 @@ export interface WindowConfig extends Record<string, unknown> {
   visibleOnAllWorkspaces?: boolean; contentProtected?: boolean
   preventOverflow?: boolean | { width?: number; height?: number }; theme?: string | null
   webviewTag?: boolean
-  appDetails?: { appId: string, relaunchCommand?: string, relaunchDisplayName?: string }
+  appDetails?: { appId: string, appIconPath?: string, appIconIndex?: number, relaunchCommand?: string, relaunchDisplayName?: string }
 }
 export interface WindowMenuItem {
   type?: 'separator' | 'checkbox'; role?: MenuItemConstructorOptions['role']; label?: string; enabled?: boolean; accelerator?: string
@@ -453,16 +453,13 @@ export class Window extends EventEmitter<WindowEvents> {
   }
 
   private applyMaximizable(): void { if (this.env.platform === 'darwin') this.env.appKit().setMaximizable(this.native.getNativeWindowHandle(), this.maximizable) }
-  /**
-   * Windows 任务栏身份：钉住窗口时按 relaunchCommand 重新拉起应用。
-   * 缺省时 Windows 只能用进程 exe 加空参数创建图钉，而壳窗口由内嵌的 Electron
-   * 运行时进程持有，裸启动它会落到 Electron 默认页（DSH 截图里的 "path-to-app"）。
-   */
   private applyAppDetails(): void {
-    const details = this.config.appDetails as { appId?: string, relaunchCommand?: string, relaunchDisplayName?: string } | undefined
+    const details = this.config.appDetails
     if (!details?.appId) return
     this.native.setAppDetails({
       appId: details.appId,
+      ...(details.appIconPath ? { appIconPath: details.appIconPath } : {}),
+      ...(details.appIconIndex !== undefined ? { appIconIndex: details.appIconIndex } : {}),
       ...(details.relaunchCommand ? { relaunchCommand: details.relaunchCommand } : {}),
       ...(details.relaunchDisplayName ? { relaunchDisplayName: details.relaunchDisplayName } : {}),
     })

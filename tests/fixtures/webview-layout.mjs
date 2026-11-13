@@ -189,6 +189,10 @@ class Window extends EventEmitter {
   setMenu(menu) { this.menu = menu; this.frame.height = menu ? 58 : 38 }
   setAutoHideMenuBar(value) { this.autoHideMenuBar = value }
   setMenuBarVisibility(value) { this.menuBarVisible = value }
+  setAppDetails(details) {
+    this.appDetails = JSON.parse(JSON.stringify(details))
+    this.nativeCalls.push({ method: 'setAppDetails', visible: this.visible })
+  }
   isDestroyed() { return this.destroyed }
   isVisible() { return this.visible }
   isMaximized() { return false }
@@ -762,6 +766,38 @@ switch (process.argv[2]) {
     await call('window.backgroundColor', { windowId: 81, color: null })
     assert.equal(opaque.contentColor, '#ffffff')
     result = { independent: view.color === '#112233', opaque: opaque.contentColor === '#ffffff' }
+    break
+  }
+  case 'taskbar': {
+    const details = {
+      appId: 'com.shuiwujia.waterbuddy',
+      appIconPath: 'C:\\Program Files\\水务加\\WaterPlusAI.exe',
+      appIconIndex: 0,
+      relaunchCommand: '"C:\\Program Files\\水务加\\WaterPlusAI.exe"',
+      relaunchDisplayName: 'WaterPlusAI',
+    }
+    for (const id of [40, 41]) {
+      await call('window.create', { windowId: id, appDetails: details })
+      const host = inspect(`state.windows.get(${id})`)
+      assert.deepEqual(host.appDetails, details, 'every taskbar button must use the application executable icon and relaunch target')
+      assert.deepEqual(host.nativeCalls.filter(call => call.method === 'setAppDetails'),
+        [{ method: 'setAppDetails', visible: false }], 'taskbar properties must be assigned before showing the window')
+    }
+    const override = { ...details, appIconPath: 'C:\\Custom Icons\\alternate.ico', appIconIndex: 2 }
+    await call('window.create', { windowId: 42, appDetails: details, window: { appDetails: override } })
+    assert.deepEqual(inspect('state.windows.get(42)').appDetails, override)
+    await call('window.create', { windowId: 43, appDetails: { appId: details.appId } })
+    assert.deepEqual(inspect('state.windows.get(43)').appDetails, { appId: details.appId })
+    for (const [id, appDetails] of [[44, undefined], [45, { appId: '', appIconPath: details.appIconPath }]]) {
+      await call('window.create', { windowId: id, appDetails })
+      assert.equal(inspect(`state.windows.get(${id})`).appDetails, undefined)
+    }
+    for (const [id, platform] of [[46, 'darwin'], [47, 'linux']]) {
+      context.process.platform = platform
+      await call('window.create', { windowId: id, appDetails: details })
+      assert.equal(inspect(`state.windows.get(${id})`).appDetails, undefined, 'taskbar properties apply only to Windows')
+    }
+    result = { details: inspect('state.windows.get(40)').appDetails }
     break
   }
   case 'configuration': {

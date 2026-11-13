@@ -274,6 +274,10 @@ pub mod window {
   pub struct AppDetails {
     pub app_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_icon_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_icon_index: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub relaunch_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relaunch_display_name: Option<String>,
