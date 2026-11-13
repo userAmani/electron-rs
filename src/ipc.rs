@@ -1005,6 +1005,50 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn host_authentication_waits_for_a_cold_start_beyond_the_generic_rpc_deadline() {
+    let (electron, peer, reader) = loopback(READY);
+    electron.start_reader(reader).unwrap();
+    let (executed, received) = oneshot::channel();
+    let (reply, release) = mpsc::channel();
+    let peer = std::thread::spawn(move || {
+      let mut reader = BufReader::new(peer);
+      let mut line = String::new();
+      reader.read_line(&mut line).unwrap();
+      let request: Value = serde_json::from_str(&line).unwrap();
+      assert_eq!(request["method"], "webHost.authenticate");
+      assert_eq!(request["params"], json!({"url":"http://127.0.0.1:3080/?token=cold-start"}));
+      assert_eq!(request["asynchronous"], true);
+      executed.send(()).unwrap();
+      release.recv_timeout(Duration::from_secs(10)).unwrap();
+      writeln!(reader.get_mut(), "{}", json!({"id":request["id"],"result":{
+        "id":"cold-host","documentUrl":"http://127.0.0.1:3080/","backendOrigin":"http://127.0.0.1:3080"
+      }})).unwrap();
+      reader
+    });
+    let mut authentication = Box::pin(electron.call(crate::rpc::protocol::AuthenticateHost {
+      url: "http://127.0.0.1:3080/?token=cold-start".into(),
+    }));
+    tokio::select! {
+      result = &mut authentication => panic!("authentication completed before the request arrived: {result:?}"),
+      received = received => received.unwrap(),
+    }
+    let early = tokio::time::timeout(Duration::from_millis(5200), &mut authentication).await;
+    reply.send(()).unwrap();
+    let host = match early {
+      Ok(result) => {
+        let _peer = peer.join().unwrap();
+        panic!("cold-start authentication stopped at the generic RPC deadline: {result:?}");
+      }
+      Err(_) => tokio::time::timeout(WAIT, authentication).await.unwrap().unwrap(),
+    };
+    assert_eq!(host.id, "cold-host");
+    assert_eq!(host.document_url, "http://127.0.0.1:3080/");
+    assert_eq!(host.backend_origin, "http://127.0.0.1:3080");
+    assert!(electron.pending.lock().unwrap().is_empty());
+    let _peer = peer.join().unwrap();
+  }
+
+  #[tokio::test]
   async fn shared_main_streams_owned_bytes_before_completion_and_survives_final_disconnect() {
     use std::future::IntoFuture as _;
     let (electron, peer, reader) = loopback(READY);

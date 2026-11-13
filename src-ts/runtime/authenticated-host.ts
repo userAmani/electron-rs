@@ -18,7 +18,7 @@ export class AuthenticatedHosts {
     if (typeof value !== 'string') throw new Error('invalid Host launch URL')
     const url = new URL(value)
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('invalid Host launch URL')
-    const response = await fetch(url, { redirect: 'manual' })
+    const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(30_000) })
     const cookie = response.headers.get('set-cookie')
     await response.body?.cancel()
     if (response.status !== 303 || !cookie) throw new Error('Host authentication failed')

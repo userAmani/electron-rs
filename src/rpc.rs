@@ -699,7 +699,7 @@ pub mod protocol {
   pub struct AuthenticatedHost { pub id: String, pub document_url: String, pub backend_origin: String }
 
   requests! {
-    AuthenticateHost { url: String } => AuthenticatedHost, "webHost.authenticate", deferred = true;
+    AuthenticateHost { url: String } => AuthenticatedHost, "webHost.authenticate", deferred = true, timeout = 35;
     HostCookieHeader { host_id: String } => String, "webHost.cookieHeader", deferred = true;
     BindHost { webview_id: u32, host_id: String } => (), "webHost.bind";
     Register { scheme: String } => (), "protocol.register";

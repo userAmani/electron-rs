@@ -7,9 +7,14 @@ import { runtimeModules } from '../fixtures/runtime-modules.mjs'
 
 const require = createRequire(import.meta.url)
 const received = []
+const authenticationStarted = Promise.withResolvers()
+const authenticationClosed = Promise.withResolvers()
 const server = createServer((request, response) => {
   received.push({ url: request.url, headers: request.headers })
-  if (request.url === '/?token=owned') {
+  if (request.url === '/slow-auth') {
+    authenticationStarted.resolve()
+    response.once('close', authenticationClosed.resolve)
+  } else if (request.url === '/?token=owned') {
     response.writeHead(303, { 'set-cookie': 'auth=private; HttpOnly; SameSite=Strict', location: '/' })
     response.end()
   } else if (request.url === '/bad-auth') {
@@ -40,15 +45,37 @@ function newSession(partition) {
   sessions.push(target)
   return target
 }
-const context = vm.createContext({ URL, Request, Response, Headers, Buffer, fetch, console })
+const authenticationDeadlines = []
+const context = vm.createContext({
+  URL, Request, Response, Headers, Buffer, fetch, console,
+  AbortSignal: {
+    timeout(milliseconds) {
+      const controller = new AbortController()
+      authenticationDeadlines.push({ milliseconds, controller })
+      return controller.signal
+    },
+  },
+})
 const load = runtimeModules(context, name => name === 'electron' ? { session: { fromPartition: newSession } } : require(name))
 try {
   const { Protocols } = load('./runtime/protocol.cjs')
   const protocols = new Protocols({ policies: { install() {} }, transport: { send() { assert.fail('stream crossed Rust') } } })
   const hosts = protocols.authenticatedHosts
+  const authentication = hosts.authenticate(origin + '/slow-auth').then(host => ({ host }), error => ({ error }))
+  await authenticationStarted.promise
+  assert.equal(authenticationDeadlines.length, 1, 'a pending authentication must have its own cancellation deadline')
+  const deadline = authenticationDeadlines[0]
+  assert.ok(deadline.milliseconds > 5000 && deadline.milliseconds < 35000, 'authentication must allow a cold start and expire before its RPC')
+  deadline.controller.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+  const failed = await authentication
+  assert.equal(failed.error?.name, 'TimeoutError')
+  assert.equal(failed.host, undefined)
+  await authenticationClosed.promise
   await assert.rejects(hosts.authenticate(origin + '/bad-auth'), /Host authentication failed/)
   await assert.rejects(hosts.authenticate(origin + '/cross-auth'), /outside its origin/)
   const host = await hosts.authenticate(origin + '/?token=owned')
+  assert.equal(authenticationDeadlines.length, 4)
+  assert.notEqual(authenticationDeadlines.at(-1).controller.signal, deadline.controller.signal)
   assert.equal(host.documentUrl, origin + '/')
   assert.equal(host.backendOrigin, origin)
   assert.equal(JSON.stringify(host).includes('private'), false)
