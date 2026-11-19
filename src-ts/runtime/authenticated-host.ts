@@ -13,6 +13,7 @@ const EPHEMERAL_PARTITION = 'electron-authenticated-'
 export class AuthenticatedHosts {
   private readonly hosts = new Map<string, Host>()
   private readonly sessions = new WeakMap<Session, Binding>()
+  private readonly portalIdentityListeners = new WeakMap<Webview, () => void>()
 
   async authenticate(value: unknown): Promise<{ id: string; documentUrl: string; backendOrigin: string }> {
     if (typeof value !== 'string') throw new Error('invalid Host launch URL')
@@ -82,7 +83,39 @@ export class AuthenticatedHosts {
     if (binding?.retiredOrigin === url.origin) return Promise.resolve(new Response(null, { status: 503 }))
     const host = binding?.host
     if (!host || url.origin !== host.backendOrigin) return undefined
-    return this.forward(request, host)
+    const response = this.forward(request, host)
+    const owner = binding.owner
+    const listener = owner && this.portalIdentityListeners.get(owner)
+    if (!listener) return response
+    const logout = url.pathname === '/api/waterbuddy/logout' && request.method === 'POST'
+    const user = url.pathname === '/api/waterbuddy/user' && request.method === 'GET'
+    const login = (url.pathname === '/api/waterbuddy/auth/status' && request.method === 'GET') ||
+      (['/api/waterbuddy/auth/login', '/api/waterbuddy/auth/register'].includes(url.pathname) && request.method === 'POST')
+    if (!logout && !user && !login) return response
+    return response.then(async (result) => {
+      const changed = (logout && result.ok) || (user && result.status === 401) ||
+        (login && result.ok && await result.clone().json().then(body => body?.status === 'SUCCESS', () => false))
+      if (changed && binding.host === host && binding.owner === owner) listener()
+      return result
+    })
+  }
+
+  watchPortalIdentity(owner: Webview, listener: () => void): void {
+    this.portalIdentityListeners.set(owner, listener)
+  }
+
+  async readPortalToken(owner: Webview): Promise<string | undefined> {
+    const binding = this.sessions.get(owner.contents.session)
+    const host = binding?.host
+    if (!host || binding.owner !== owner || owner.trustedOrigin !== host.backendOrigin) return
+    if (!['127.0.0.1', 'localhost', '[::1]'].includes(new URL(host.backendOrigin).hostname)) return
+    const response = await this.forward(new Request(new URL('/api/waterbuddy/portal/token', host.backendOrigin), {
+      method: 'POST', headers: { 'x-waterbuddy-portal': '1', 'cache-control': 'no-store' },
+      signal: AbortSignal.timeout(1200),
+    }), host)
+    if (!response.ok) { await response.body?.cancel(); return }
+    const { token } = await response.json()
+    if (binding.host === host && binding.owner === owner && typeof token === 'string' && token.length > 0 && token.length <= 4096) return token
   }
 
   private matches(value: string, origin: string): boolean {

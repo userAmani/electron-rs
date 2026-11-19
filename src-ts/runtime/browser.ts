@@ -1,18 +1,30 @@
 import { randomUUID } from 'node:crypto'
+import path from 'node:path'
 import { documentOrigin } from './origin'
 import { session } from 'electron'
 import type { WebContents } from 'electron'
 import type { Webview } from './webview'
 import type { Transport } from '../socket/transport'
+import type { AuthenticatedHosts } from './authenticated-host'
 
-type Lease = { owner: Webview; partition: string; frame: WebContents['mainFrame']; attached: boolean; guest?: WebContents }
+type PortalHandoff = { url: string; expiresAt: number; token?: string }
+type Lease = { owner: Webview; partition: string; frame: WebContents['mainFrame']; attached: boolean; guest?: WebContents; portal?: PortalHandoff; portalSignedIn?: boolean }
+
+function portalArticle(value: string): string | undefined {
+  if (!URL.canParse(value)) return
+  const url = new URL(value)
+  if (url.origin !== 'https://web.shuiwujia.com' || !['/pc/detail', '/pc/detail/'].includes(url.pathname) || url.username || url.password ||
+    url.searchParams.has('waterbuddy_token') || url.searchParams.has('waterbuddy_logout')) return
+  url.hash = ''
+  return url.href
+}
 
 export class BrowserGuests {
   private readonly partitions = new Map<string, string>()
   private readonly hosts = new Map<Webview, string>()
   private readonly leases = new Map<string, Lease>()
 
-  constructor(private readonly transport: Transport) {}
+  constructor(private readonly transport: Transport, private readonly authenticatedHosts: AuthenticatedHosts) {}
 
   private owner(owner: Webview): void {
     const origin = this.hosts.has(owner) ? owner.trustedOrigin : undefined
@@ -40,13 +52,32 @@ export class BrowserGuests {
             ? !url.username && !url.password && !this.applicationHost(url)
             : ['about:', 'data:', 'blob:'].includes(url.protocol)
         } catch {}
-        callback({ cancel: !allowed })
+        const article = allowed && details.method === 'GET' && details.resourceType === 'mainFrame' ? portalArticle(details.url) : undefined
+        const lease = article && [...this.leases.values()].find(candidate => candidate.partition === partition && candidate.guest?.id === details.webContentsId)
+        if (article && lease && this.authenticatedHosts.ownsSession(lease.owner.contents.session)) {
+          void this.preparePortal(lease, article).then(() => callback({ cancel: lease.guest?.isDestroyed() ?? true }))
+        } else {
+          callback({ cancel: !allowed })
+        }
       })
       this.partitions.set(workspace, partition)
     }
     const lease = randomUUID()
     this.leases.set(lease, { owner, partition, frame: owner.contents.mainFrame, attached: false })
     return { lease, partition }
+  }
+
+  private async preparePortal(lease: Lease, url: string): Promise<void> {
+    const owner = lease.owner
+    const handoff: PortalHandoff = { url, expiresAt: Date.now() + 15_000 }
+    lease.portal = handoff
+    try {
+      this.owner(owner)
+      if (owner.trustedNavigationPending || lease.frame !== owner.contents.mainFrame) return
+      handoff.token = await this.authenticatedHosts.readPortalToken(owner)
+    } catch {
+      if (lease.portal === handoff) lease.portal = undefined
+    }
   }
 
   async releaseAll(owner: Webview): Promise<void> {
@@ -93,7 +124,15 @@ export class BrowserGuests {
     if (origin === 'null') throw new Error('browser guest: host requires a document origin')
     this.hosts.set(owner, origin)
     const contents = owner.contents
+    const authenticatedSession = this.authenticatedHosts.ownsSession(contents.session)
     const attachments = new Map<number, string>()
+    if (authenticatedSession) this.authenticatedHosts.watchPortalIdentity(owner, () => {
+      for (const [id, lease] of this.leases) {
+        if (lease.owner.trustedOrigin !== owner.trustedOrigin || (!lease.portal && !lease.portalSignedIn)) continue
+        lease.portal = undefined
+        void this.close(id).catch(error => console.error('browser guest cleanup failed', error))
+      }
+    })
     const releaseAll = () => {
       attachments.clear()
       for (const [id, lease] of this.leases) if (lease.owner === owner) void this.close(id).catch(error => console.error('browser guest cleanup failed', error))
@@ -116,6 +155,7 @@ export class BrowserGuests {
         webSecurity: true, allowRunningInsecureContent: false, webviewTag: false,
         plugins: false, navigateOnDragDrop: false, disableDialogs: true, devTools: false,
       })
+      if (authenticatedSession) preferences.preload = path.join(__dirname, '..', 'browser-portal.cjs')
       params.httpreferrer = ''
     })
     contents.on('did-attach-webview', (_event, guest) => {
@@ -125,6 +165,19 @@ export class BrowserGuests {
       const attached = attachedId === undefined ? undefined : this.leases.get(attachedId)
       if (owner.trustedNavigationPending || !attachedId || !attached || attached.owner !== owner || attached.guest || attached.frame !== contents.mainFrame || guest.session !== session.fromPartition(attached.partition)) { guest.close({ waitForBeforeUnload: false }); return }
       attached.guest = guest
+      if (authenticatedSession) guest.ipc.on('waterbuddy:consume-preview-login', event => {
+        const handoff = attached.portal
+        if (!handoff || !event.senderFrame || event.senderFrame !== guest.mainFrame || portalArticle(event.senderFrame.url) !== handoff.url ||
+          this.leases.get(attachedId) !== attached || attached.frame !== contents.mainFrame || owner.trustedNavigationPending ||
+          contents.isDestroyed() || documentOrigin(contents.getURL()) !== owner.trustedOrigin) {
+          event.returnValue = null
+          return
+        }
+        attached.portal = undefined
+        const token = handoff.expiresAt > Date.now() ? handoff.token : undefined
+        if (token) attached.portalSignedIn = true
+        event.returnValue = token ?? null
+      })
       guest.once('destroyed', () => { this.leases.delete(attachedId) })
       guest.once('render-process-gone', () => { void this.close(attachedId).catch(error => console.error('browser guest cleanup failed', error)) })
       guest.once('dom-ready', () => {

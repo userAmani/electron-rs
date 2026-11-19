@@ -42,7 +42,9 @@ export class Factory implements WindowFactory {
 
   private readonly browser: BrowserGuests
 
-  constructor(private readonly deps: FactoryDependencies) { this.browser = new BrowserGuests(deps.transport) }
+  constructor(private readonly deps: FactoryDependencies) {
+    this.browser = new BrowserGuests(deps.transport, deps.protocols.authenticatedHosts)
+  }
 
   acquireBrowserGuest(webviewId: number, workspace: unknown): { lease: string; partition: string } {
     return this.browser.acquire(this.deps.webviews.get(webviewId), workspace)
